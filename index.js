@@ -8,12 +8,29 @@ require('dotenv').config();
 const app = express();
 const upload = multer({ dest: 'uploads/' });
 
-app.use(cors());
+// --- CONFIGURAÇÃO DE CORS ---
+// Permite acesso de qualquer lugar (*) ou restrinja para seu domínio no futuro
+app.use(cors({
+  origin: '*', // Para protótipos e hackathons, '*' é o mais seguro para evitar dor de cabeça
+  methods: ['GET', 'POST']
+}));
+
 app.use(express.json());
 
-const MUSIC_AI_KEY = process.env.MUSIC_AI_KEY;
-const WORKFLOW_ID = process.env.WORKFLOW_ID; 
-const BASE_URL = 'https://api.music.ai/api'; 
+// --- TRATAMENTO DE CHAVE (TRIM) ---
+const MUSIC_AI_KEY = process.env.MUSIC_AI_KEY ? process.env.MUSIC_AI_KEY.trim() : "";
+const WORKFLOW_ID = process.env.WORKFLOW_ID ? process.env.WORKFLOW_ID.trim() : "";
+const BASE_URL = 'https://api.music.ai/v1'; 
+
+// Health Check (Para testar se o servidor está vivo)
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    hasKey: !!MUSIC_AI_KEY, 
+    keyLength: MUSIC_AI_KEY.length, 
+    workflow: WORKFLOW_ID 
+  });
+});
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -32,19 +49,12 @@ const sendDemo = (res, motivo) => {
 
 function findValueByKey(obj, keysToFind) {
   if (!obj || typeof obj !== 'object') return null;
-  
-  // Normaliza chaves do objeto para minúsculas para facilitar a busca
   const normalizedObj = {};
-  for (const key in obj) {
-    normalizedObj[key.toLowerCase()] = obj[key];
-  }
-
+  for (const key in obj) normalizedObj[key.toLowerCase()] = obj[key];
   for (const key of keysToFind) {
     const k = key.toLowerCase();
     if (normalizedObj[k]) return normalizedObj[k];
   }
-  
-  // Busca profunda se necessário
   for (const key in obj) {
     if (typeof obj[key] === 'object') {
       const found = findValueByKey(obj[key], keysToFind);
@@ -58,54 +68,65 @@ app.post('/separate', upload.single('audio'), async (req, res) => {
   try {
     console.log("\n🎵 RECEBENDO UPLOAD...");
     
-    if (!MUSIC_AI_KEY) return sendDemo(res, "Falta chave API");
+    // Validação inicial
+    if (!MUSIC_AI_KEY) return sendDemo(res, "Falta chave API no .env");
+    if (MUSIC_AI_KEY.length < 10) return sendDemo(res, "Chave API parece inválida (muito curta)");
 
-    // 1. URL
+    console.log(`🔑 Chave carregada (${MUSIC_AI_KEY.length} chars). Iniciando...`);
+
+    // 1. OBTER URL DE UPLOAD
     let uploadData;
     try {
-      const getUrlRes = await axios.get(`${BASE_URL}/upload`, { headers: { 'Authorization': MUSIC_AI_KEY } });
+      const getUrlRes = await axios.get(`${BASE_URL}/upload`, { 
+        headers: { 'Authorization': MUSIC_AI_KEY } 
+      });
       uploadData = getUrlRes.data;
     } catch (e) {
-      fs.unlinkSync(req.file.path);
-      return sendDemo(res, "Erro conexão Music.ai");
+      console.error("❌ Erro Auth/Conexão:", e.response?.data || e.message);
+      if (req.file) fs.unlinkSync(req.file.path);
+      return sendDemo(res, "Erro de Autenticação na Music.ai (Verifique o .env)");
     }
 
     const putUrl = uploadData.uploadUrl || uploadData.url;
     const downloadUrl = uploadData.downloadUrl;
 
-    // 2. UPLOAD
-    console.log("📤 Enviando...");
+    // 2. UPLOAD DO ARQUIVO
+    console.log("📤 Enviando arquivo...");
     const fileBuffer = fs.readFileSync(req.file.path);
     await axios.put(putUrl, fileBuffer, {
       headers: { 'Content-Type': 'audio/mpeg', 'Content-Length': req.file.size }
     });
 
-    // 3. JOB
-    console.log(`🧠 Iniciando Workflow...`);
+    // 3. CRIAR JOB
+    console.log(`🧠 Criando job (Workflow: ${WORKFLOW_ID})...`);
     const jobRes = await axios.post(`${BASE_URL}/job`, {
       name: `synesthesia-${Date.now()}`,
       workflow: WORKFLOW_ID, 
       params: { inputUrl: downloadUrl }
-    }, { headers: { 'Authorization': MUSIC_AI_KEY } });
+    }, { 
+      headers: { 'Authorization': MUSIC_AI_KEY } 
+    });
 
     const jobId = jobRes.data.id;
     console.log(`⏳ Job ID: ${jobId}`);
 
     // 4. POLLING
     let fullResponse = null;
-    for (let i = 0; i < 100; i++) { 
+    for (let i = 0; i < 60; i++) { 
       await sleep(2000);
-      const checkRes = await axios.get(`${BASE_URL}/job/${jobId}`, { headers: { 'Authorization': MUSIC_AI_KEY } });
-      const status = checkRes.data.status ? checkRes.data.status.toUpperCase() : 'UNKNOWN';
+      const checkRes = await axios.get(`${BASE_URL}/job/${jobId}`, { 
+        headers: { 'Authorization': MUSIC_AI_KEY } 
+      });
+      const status = (checkRes.data.status || 'UNKNOWN').toUpperCase();
       process.stdout.write(".");
       
       if (status === 'SUCCEEDED' || status === 'COMPLETED' || status === 'SUCCESS') {
         fullResponse = checkRes.data;
         break;
       } else if (status === 'FAILED') {
-        console.log("\n❌ Falhou.");
+        console.log("\n❌ Falha no processamento da IA.");
         fs.unlinkSync(req.file.path);
-        return sendDemo(res, "Falha na IA");
+        return sendDemo(res, "Falha no Job");
       }
     }
 
@@ -114,23 +135,22 @@ app.post('/separate', upload.single('audio'), async (req, res) => {
     console.log("\n✅ Concluído!");
     fs.unlinkSync(req.file.path);
 
-    // 5. EXTRAÇÃO ROBUSA
+    // 5. EXTRAIR LINKS
     const result = fullResponse?.result || {};
-    console.log("📦 Resposta Bruta:", JSON.stringify(result, null, 2));
+    console.log("📦 Resultado:", JSON.stringify(result, null, 2));
     
-    // LISTAS DE SINÔNIMOS ATUALIZADAS
     const drumsUrl = findValueByKey(result, ['bateria', 'drums', 'drum']);
     const bassUrl = findValueByKey(result, ['baixo', 'bass']);
-    const vocalsUrl = findValueByKey(result, ['voz', 'vozes', 'vocals', 'vocal', 'voice']); // Adicionado "voz"
-    
-    // Tenta achar outros instrumentos ou usa "outros" como coringa
+    const vocalsUrl = findValueByKey(result, ['voz', 'vozes', 'vocals', 'vocal']);
     const otherUrl = findValueByKey(result, ['outros', 'outro', 'other', 'others', 'accompaniment']);
-    const guitarUrl = findValueByKey(result, ['guitarra', 'guitar', 'guitarras']) || otherUrl;
+    
+    const guitarUrl = findValueByKey(result, ['guitarra', 'guitar']) || otherUrl;
     const pianoUrl = findValueByKey(result, ['piano', 'keys', 'teclado']) || otherUrl;
 
-    if (!drumsUrl && !bassUrl) return sendDemo(res, "Links vazios");
+    if (!drumsUrl && !bassUrl && !vocalsUrl) {
+      return sendDemo(res, "Nenhum link encontrado");
+    }
 
-    // Retorna o objeto final
     res.json({
       success: true,
       stems: {
@@ -143,12 +163,13 @@ app.post('/separate', upload.single('audio'), async (req, res) => {
     });
 
   } catch (error) {
-    console.error("\n❌ Erro:", error.message);
+    console.error("\n❌ Erro Fatal:", error.message);
     if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     return sendDemo(res, "Erro interno");
   }
 });
 
-app.listen(3001, () => {
-  console.log('🚀 SERVIDOR CORRIGIDO RODANDO (3001)');
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`🚀 SERVIDOR V1 PRONTO (Porta ${PORT})`);
 });
