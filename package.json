@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "postinstall": "curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o ./yt-dlp && chmod a+rx ./yt-dlp"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +18,7 @@
     "express": "^5.1.0",
     "form-data": "^4.0.5",
     "multer": "^2.0.2",
-    "replicate": "^1.4.0"
+    "replicate": "^1.4.0",
+    "yt-dlp-wrap": "^2.3.12"
   }
 }
